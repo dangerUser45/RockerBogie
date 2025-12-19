@@ -65,7 +65,7 @@ static void setAllSpeed(uint8_t s) {
 void loop()
 {
   const uint32_t WAITING_TIME = 500;
-  const uint8_t SPEED = 0;
+  const uint8_t SPEED = 128;
   for(int i = 0; i < 6; ++i) {
     setMotorSpeed((Motor)i, SPEED);
 
