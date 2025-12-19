@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html>
+<body>
+<h1>Robot Control</h1>
+
+<script>
+let ws = new WebSocket("ws://192.168.4.1:81/");
+
+document.addEventListener("keydown", function(e) {
+    if (e.key === "w") ws.send("W");
+    if (e.key === "s") ws.send("S");
+    if (e.key === "a") ws.send("A");
+    if (e.key === "d") ws.send("D");
+    if (e.key === " ") ws.send("STOP");
+});
+</script>
+
+</body>
+</html>
