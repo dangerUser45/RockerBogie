@@ -1,69 +1,125 @@
 #include <Arduino.h>
 #include <Wire.h>
 
+#include "debug_log.h"
 #include "motor.h"
 
 uint8_t pcfState = 0xFF;
+uint8_t pcfStateRear = 0xFF;
 
 // -------------------- Работа с PCF8574 --------------------
 
-bool pcfWriteState() {
-    Wire.beginTransmission(PCF8574_ADDR);
-    Wire.write(pcfState);
-    uint8_t error = Wire.endTransmission();
+static uint8_t* pcfStateForAddr(uint8_t addr) {
+    if (addr == PCF8574_ADDR_MAIN) return &pcfState;
+    if (addr == PCF8574_ADDR_REAR) return &pcfStateRear;
+    return nullptr;
+}
 
+bool pcfWriteState(uint8_t addr) {
+    uint8_t* state = pcfStateForAddr(addr);
+    if (state == nullptr) {
+        Debug.printf("[PCF 0x%02X] unknown address\n", addr);
+        return false;
+    }
+
+    Wire.beginTransmission(addr);
+    Wire.write(*state);
+    uint8_t error = Wire.endTransmission();
     if (error != 0) {
-        Serial.print("[PCF] write ERROR = ");
-        Serial.println(error);
+        Debug.printf("[PCF 0x%02X] write ERROR = %u\n", addr, error);
         return false;
     } else {
-        Serial.print("[PCF] state written: 0b");
-        Serial.println(pcfState, BIN);
+        Debug.printf("[PCF 0x%02X] state written: 0b", addr);
+        Debug.println(*state, BIN);
         return true;
     }
 }
 
-void pcfSetPin(uint8_t pin, bool level) {
+bool pcfWriteState() {
+    bool ok = pcfWriteState(PCF8574_ADDR_MAIN);
+    ok = pcfWriteState(PCF8574_ADDR_REAR) && ok;
+    return ok;
+}
+
+void pcfSetPin(uint8_t addr, uint8_t pin, bool level) {
     if (pin > 7) {
-        Serial.print("[PCF] invalid pin: ");
-        Serial.println(pin);
+        Debug.printf("[PCF 0x%02X] invalid pin: %u\n", addr, pin);
+        return;
+    }
+
+    uint8_t* state = pcfStateForAddr(addr);
+    if (state == nullptr) {
+        Debug.printf("[PCF 0x%02X] unknown address\n", addr);
         return;
     }
 
     if (level) {
-        pcfState |= (1 << pin);
+        *state |= (1 << pin);
     } else {
-        pcfState &= ~(1 << pin);
+        *state &= ~(1 << pin);
     }
 
-    Serial.print("[PCF] pin ");
-    Serial.print(pin);
-    Serial.print(" <- ");
-    Serial.print(level ? "HIGH" : "LOW");
-    Serial.print(" | new state: 0b");
-    Serial.println(pcfState, BIN);
+    Debug.printf("[PCF 0x%02X] pin %u <- %s | new state: 0b",
+                  addr, pin, level ? "HIGH" : "LOW");
+    Debug.println(*state, BIN);
 
-    pcfWriteState();
+    pcfWriteState(addr);
+}
+
+void pcfSetPin(uint8_t pin, bool level) {
+    pcfSetPin(PCF8574_ADDR_MAIN, pin, level);
 }
 
 // -------------------- Общий вывод на "пин направления" --------------------
 
-static inline bool isPcfPin(uint8_t pin) {
-    return pin <= 7;
-}
-
-// Для PCF: меняем бит и пишем по I2C
-// Для GPIO: digitalWrite напрямую
-static void writeDirPin(uint8_t pin, bool level) {
-    if (isPcfPin(pin)) {
-        pcfSetPin(pin, level);
-        return;
+static bool stagePcfPin(const DirPin& dirPin, bool level) {
+    if (dirPin.pin > 7) {
+        Debug.printf("[PCF 0x%02X] invalid pin: %u\n", dirPin.addr, dirPin.pin);
+        return false;
     }
 
-    pinMode(pin, OUTPUT);
-    digitalWrite(pin, level ? HIGH : LOW);
+    uint8_t* state = pcfStateForAddr(dirPin.addr);
+    if (state == nullptr) {
+        Debug.printf("[PCF 0x%02X] unknown address\n", dirPin.addr);
+        return false;
+    }
 
-    Serial.printf("[GPIO] pin %u <- %s\n", pin, level ? "HIGH" : "LOW");
+    if (level) {
+        *state |= (1 << dirPin.pin);
+    } else {
+        *state &= ~(1 << dirPin.pin);
+    }
+
+    Debug.printf("[PCF 0x%02X] pin %u <- %s\n",
+                  dirPin.addr, dirPin.pin, level ? "HIGH" : "LOW");
+    return true;
+}
+
+static void markPcfChanged(uint8_t addr, bool& mainChanged, bool& rearChanged) {
+    if (addr == PCF8574_ADDR_MAIN) mainChanged = true;
+    if (addr == PCF8574_ADDR_REAR) rearChanged = true;
+}
+
+// Направление мотора меняем атомарно: обе линии направления готовятся
+// сначала, и только потом уходит одна запись в PCF8574.
+static void writeDirPins(const DirPin& in1, bool in1Level, const DirPin& in2, bool in2Level) {
+    bool mainChanged = false;
+    bool rearChanged = false;
+
+    if (stagePcfPin(in1, in1Level)) markPcfChanged(in1.addr, mainChanged, rearChanged);
+    if (stagePcfPin(in2, in2Level)) markPcfChanged(in2.addr, mainChanged, rearChanged);
+
+    if (mainChanged) {
+        Debug.print("[PCF 0x20] new state: 0b");
+        Debug.println(pcfState, BIN);
+        pcfWriteState(PCF8574_ADDR_MAIN);
+    }
+
+    if (rearChanged) {
+        Debug.print("[PCF 0x21] new state: 0b");
+        Debug.println(pcfStateRear, BIN);
+        pcfWriteState(PCF8574_ADDR_REAR);
+    }
 }
 
 // -------------------- Управление моторами --------------------
@@ -80,8 +136,8 @@ const char* dirToStr(Direction d) {
 
 struct MotorCfg {
     const char* name;
-    uint8_t in1;
-    uint8_t in2;
+    DirPin in1;
+    DirPin in2;
     int pwmPin;
     int pwmCh;
 };
@@ -104,7 +160,7 @@ void motorPwmInit() {
     for (int i = 0; i < 6; i++) {
         ledcSetup(cfgs[i].pwmCh, PWM_FREQ, PWM_RES);
         ledcAttachPin(cfgs[i].pwmPin, cfgs[i].pwmCh);
-        Serial.printf("[PWM] %-7s pin=%d channel=%d freq=%dHz res=%dbit\n",
+        Debug.printf("[PWM] %-7s pin=%d channel=%d freq=%dHz res=%dbit\n",
                       cfgs[i].name, cfgs[i].pwmPin, cfgs[i].pwmCh, PWM_FREQ, PWM_RES);
     }
 }
@@ -112,37 +168,33 @@ void motorPwmInit() {
 void setMotorDirection(Motor m, Direction dir) {
     const MotorCfg& c = getCfg(m);
 
-    Serial.printf("[MOTOR %s] direction -> %s\n", c.name, dirToStr(dir));
+    Debug.printf("[MOTOR %s] direction -> %s\n", c.name, dirToStr(dir));
 
     switch (dir) {
         case DIR_STOP:
-            // IN1=1, IN2=1 (как у вас было)
-            writeDirPin(c.in1, true);
-            writeDirPin(c.in2, true);
+            // IN1=0, IN2=0
+            writeDirPins(c.in1, false, c.in2, false);
             break;
 
         case DIR_FORWARD:
             // IN1=1, IN2=0
-            writeDirPin(c.in1, true);
-            writeDirPin(c.in2, false);
+            writeDirPins(c.in1, true, c.in2, false);
             break;
 
         case DIR_BACKWARD:
             // IN1=0, IN2=1
-            writeDirPin(c.in1, false);
-            writeDirPin(c.in2, true);
+            writeDirPins(c.in1, false, c.in2, true);
             break;
 
         case DIR_BRAKE:
-            // IN1=0, IN2=0
-            writeDirPin(c.in1, false);
-            writeDirPin(c.in2, false);
+            // IN1=1, IN2=1
+            writeDirPins(c.in1, true, c.in2, true);
             break;
     }
 }
 
 void setMotorSpeed(Motor m, uint8_t duty) {
     const MotorCfg& c = getCfg(m);
-    Serial.printf("[%s] PWM = %u\n", c.name, duty);
+    Debug.printf("[%s] PWM = %u\n", c.name, duty);
     ledcWrite(c.pwmCh, duty);
 }
