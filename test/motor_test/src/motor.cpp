@@ -52,18 +52,47 @@ static inline bool isPcfPin(uint8_t pin) {
     return pin <= 7;
 }
 
-// Для PCF: меняем бит и пишем по I2C
-// Для GPIO: digitalWrite напрямую
-static void writeDirPin(uint8_t pin, bool level) {
-    if (isPcfPin(pin)) {
-        pcfSetPin(pin, level);
-        return;
-    }
-
+static void writeGpioDirPin(uint8_t pin, bool level) {
     pinMode(pin, OUTPUT);
     digitalWrite(pin, level ? HIGH : LOW);
 
     Serial.printf("[GPIO] pin %u <- %s\n", pin, level ? "HIGH" : "LOW");
+}
+
+static void stagePcfPin(uint8_t pin, bool level) {
+    if (level) {
+        pcfState |= (1 << pin);
+    } else {
+        pcfState &= ~(1 << pin);
+    }
+
+    Serial.printf("[PCF] pin %u <- %s\n", pin, level ? "HIGH" : "LOW");
+}
+
+// Направление мотора меняем атомарно: обе линии направления готовятся
+// сначала, и только потом уходит одна запись в PCF8574.
+static void writeDirPins(uint8_t in1, bool in1Level, uint8_t in2, bool in2Level) {
+    bool pcfChanged = false;
+
+    if (isPcfPin(in1)) {
+        stagePcfPin(in1, in1Level);
+        pcfChanged = true;
+    } else {
+        writeGpioDirPin(in1, in1Level);
+    }
+
+    if (isPcfPin(in2)) {
+        stagePcfPin(in2, in2Level);
+        pcfChanged = true;
+    } else {
+        writeGpioDirPin(in2, in2Level);
+    }
+
+    if (pcfChanged) {
+        Serial.print("[PCF] new state: 0b");
+        Serial.println(pcfState, BIN);
+        pcfWriteState();
+    }
 }
 
 // -------------------- Управление моторами --------------------
@@ -116,27 +145,23 @@ void setMotorDirection(Motor m, Direction dir) {
 
     switch (dir) {
         case DIR_STOP:
-            // IN1=1, IN2=1 (как у вас было)
-            writeDirPin(c.in1, true);
-            writeDirPin(c.in2, true);
+            // IN1=0, IN2=0
+            writeDirPins(c.in1, false, c.in2, false);
             break;
 
         case DIR_FORWARD:
             // IN1=1, IN2=0
-            writeDirPin(c.in1, true);
-            writeDirPin(c.in2, false);
+            writeDirPins(c.in1, true, c.in2, false);
             break;
 
         case DIR_BACKWARD:
             // IN1=0, IN2=1
-            writeDirPin(c.in1, false);
-            writeDirPin(c.in2, true);
+            writeDirPins(c.in1, false, c.in2, true);
             break;
 
         case DIR_BRAKE:
-            // IN1=0, IN2=0
-            writeDirPin(c.in1, false);
-            writeDirPin(c.in2, false);
+            // IN1=1, IN2=1
+            writeDirPins(c.in1, true, c.in2, true);
             break;
     }
 }

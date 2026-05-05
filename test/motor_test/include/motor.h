@@ -18,18 +18,18 @@ const int PIN_STBY = 4;       // STBY (HIGH = драйверы включены)
 // -------------------- PCF8574 --------------------
 
 // Адрес PCF8574 (A0=A1=A2=0 → 0x20)
-const uint8_t PCF8574_ADDR = 0x20;
+const uint8_t PCF8574_ADDR = 0x21;
 
 // Соответствие линий PCF8574 -> TB6612 (две микросхемы TB6612 = 8 линий направлений)
-const uint8_t DRIVER_1_PIN_AIN1 = 4; // P0
-const uint8_t DRIVER_1_PIN_AIN2 = 5; // P1
-const uint8_t DRIVER_1_PIN_BIN1 = 6; // P2
-const uint8_t DRIVER_1_PIN_BIN2 = 7; // P3
+const uint8_t DRIVER_1_PIN_AIN1 = 0; // P0
+const uint8_t DRIVER_1_PIN_AIN2 = 1; // P1
+const uint8_t DRIVER_1_PIN_BIN1 = 2; // P2
+const uint8_t DRIVER_1_PIN_BIN2 = 3; // P3
 
-const uint8_t DRIVER_2_PIN_AIN1 = 0; // P4
-const uint8_t DRIVER_2_PIN_AIN2 = 1; // P5
-const uint8_t DRIVER_2_PIN_BIN1 = 2; // P6
-const uint8_t DRIVER_2_PIN_BIN2 = 3; // P7
+const uint8_t DRIVER_2_PIN_AIN1 = 4; // P4
+const uint8_t DRIVER_2_PIN_AIN2 = 5; // P5
+const uint8_t DRIVER_2_PIN_BIN1 = 6; // P6
+const uint8_t DRIVER_2_PIN_BIN2 = 7; // P7
 
 /*
   DRIVER_3 направления — напрямую на ESP32 (временно или постоянно):

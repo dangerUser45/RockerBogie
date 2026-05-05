@@ -81,8 +81,4 @@ void loop()
     setMotorDirection((Motor)i, DIR_BRAKE);
     delay(WAITING_TIME);
   }
-  // setMotorSpeed(MOTOR_3, 0);
-  // // тест направления через P6/P7
-  // for(int i = 0; i < 7; ++i) pcfSetPin(i, false);
-  // delay(5000);
 }
