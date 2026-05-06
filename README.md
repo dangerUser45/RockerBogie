@@ -24,7 +24,7 @@
 
 | Назначение | ESP32 / I2C |
 | --- | --- |
-| Wi-Fi AP | `RockerBogie`, `192.168.4.1` |
+| Wi-Fi AP | `RockerBogie`, `10.0.0.1` |
 | I2C SDA / SCL | GPIO `21` / GPIO `22` |
 | TB6612FNG STBY | GPIO `4` |
 | PCA9685 | I2C `0x40`, servo channels `0-5` |

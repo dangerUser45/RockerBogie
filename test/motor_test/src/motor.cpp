@@ -150,13 +150,15 @@ void setMotorDirection(Motor m, Direction dir) {
             break;
 
         case DIR_FORWARD:
-            // IN1=1, IN2=0
-            writeDirPins(c.in1, true, c.in2, false);
+            // Physical forward for this wiring.
+            // IN1=0, IN2=1
+            writeDirPins(c.in1, false, c.in2, true);
             break;
 
         case DIR_BACKWARD:
-            // IN1=0, IN2=1
-            writeDirPins(c.in1, false, c.in2, true);
+            // Physical backward for this wiring.
+            // IN1=1, IN2=0
+            writeDirPins(c.in1, true, c.in2, false);
             break;
 
         case DIR_BRAKE:

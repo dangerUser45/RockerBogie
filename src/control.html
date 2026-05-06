@@ -1,19 +1,442 @@
-<!DOCTYPE html>
-<html>
-<body>
-<h1>Robot Control</h1>
+<!DOCTYPE html><html>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<style>
+  body { margin:0; font-family: sans-serif; }
+  .wrap { display:grid; grid-template-columns: 1fr 1fr; gap:12px; padding:12px; }
+  .card { border:1px solid #ddd; border-radius:12px; padding:12px; }
+  .btns { display:grid; grid-template-columns: repeat(3, 1fr); gap:10px; }
+  button { padding:18px 10px; font-size:18px; border-radius:12px; border:1px solid #bbb; background:#fff; }
+  button:active { background:#eee; }
+  .stop { border-color:#f55; color:#b00000; }
+  .stop.disabled { background:#b00000; border-color:#b00000; color:#fff; }
+  .row { display:flex; gap:10px; align-items:center; }
+  input[type=range] { width:100%; }
+  .small { color:#666; font-size:12px; }
+  .joysticks { display:grid; grid-template-columns: 1fr 1fr; gap:14px; }
+  .stickBox { display:grid; gap:8px; justify-items:center; }
+  .stickLabel { color:#333; font-size:13px; }
+  .stick {
+    width:min(42vw, 170px);
+    height:min(42vw, 170px);
+    max-width:170px;
+    max-height:170px;
+    min-width:130px;
+    min-height:130px;
+    position:relative;
+    border-radius:50%;
+    border:2px solid #bbb;
+    background:radial-gradient(circle at center, #fafafa 0 34%, #eee 35% 100%);
+    touch-action:none;
+    user-select:none;
+  }
+  .knob {
+    width:42%;
+    height:42%;
+    position:absolute;
+    left:50%;
+    top:50%;
+    border-radius:50%;
+    transform:translate(-50%, -50%);
+    background:#333;
+    box-shadow:0 3px 10px rgba(0,0,0,.25);
+    pointer-events:none;
+  }
+  .logbox { height:240px; overflow:auto; margin:0; padding:10px; background:#111; color:#ddd; font:12px/1.35 monospace; border-radius:8px; white-space:pre-wrap; }
+  @media (max-width: 800px){
+    .wrap { grid-template-columns: 1fr; }
+    .joysticks { grid-template-columns: 1fr 1fr; }
+  }
+</style>
+
+<div class="wrap">
+  <div class="card">
+    <h3>Drive</h3>
+    <div class="btns">
+      <div></div>
+      <button id="fwd">F</button>
+      <div></div>
+
+      <button id="left">L</button>
+      <button id="stop" class="stop">STOP</button>
+      <button id="right">R</button>
+
+      <div></div>
+      <button id="back">B</button>
+      <div></div>
+    </div>
+
+    <div style="margin-top:14px;">
+      <div class="row">
+        <div style="min-width:90px;">Speed:</div>
+        <div id="spdTxt" style="font-size:22px;">255</div>
+      </div>
+      <input id="spd" type="range" min="0" max="255" value="255"/>
+      <div class="small">Max speed (0..255)</div>
+      <div id="timerStatus" class="small">Timer: 0 | Wi-Fi clients: 0</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>Joysticks</h3>
+    <div class="joysticks">
+      <div class="stickBox">
+        <div id="leftStick" class="stick"><div class="knob"></div></div>
+        <div class="stickLabel">Forward / Back</div>
+      </div>
+      <div class="stickBox">
+        <div id="rightStick" class="stick"><div class="knob"></div></div>
+        <div class="stickLabel">Left / Right</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>Log</h3>
+    <pre id="log" class="logbox"></pre>
+  </div>
+</div>
 
 <script>
-let ws = new WebSocket("ws://192.168.4.1:81/");
+let gateway = `ws://${window.location.hostname}/ws`;
+let logGateway = `ws://${window.location.hostname}/log`;
+let ws;
+let logWs;
 
-document.addEventListener("keydown", function(e) {
-    if (e.key === "w") ws.send("W");
-    if (e.key === "s") ws.send("S");
-    if (e.key === "a") ws.send("A");
-    if (e.key === "d") ws.send("D");
-    if (e.key === " ") ws.send("STOP");
+const spd = document.querySelector("#spd");
+const spdTxt = document.querySelector("#spdTxt");
+const stopBtn = document.querySelector("#stop");
+const logEl = document.querySelector("#log");
+const timerStatus = document.querySelector("#timerStatus");
+const keyDirs = new Map([
+  ["w", 1],
+  ["s", 2],
+  ["a", 4],
+  ["d", 3],
+]);
+const keyCodeDirs = new Map([
+  ["KeyW", 1],
+  ["KeyS", 2],
+  ["KeyA", 4],
+  ["KeyD", 3],
+]);
+const pressedKeys = new Map();
+let activeDir = 0;
+let holdTimer = null;
+const JOYSTICK_SEND_MS = 90;
+const JOYSTICK_CHANGE_STEP = 4;
+const joystick = {
+  throttle: 0,
+  turn: 0,
+  leftActive: false,
+  rightActive: false,
+  leftPointer: null,
+  rightPointer: null,
+  timer: null,
+  lastThrottle: null,
+  lastTurn: null,
+  lastSendMs: 0,
+  stopToken: 0,
+  resetters: [],
+};
+
+function send(obj){
+  if(ws && ws.readyState === 1) ws.send(JSON.stringify(obj));
+}
+
+function dirFromKeyEvent(e){
+  if(keyCodeDirs.has(e.code)) return keyCodeDirs.get(e.code);
+  const key = e.key.toLowerCase();
+  return keyDirs.has(key) ? keyDirs.get(key) : 0;
+}
+
+function ensureHoldTimer(){
+  if(holdTimer) return;
+  holdTimer = setInterval(() => {
+    if(activeDir === 0){
+      clearInterval(holdTimer);
+      holdTimer = null;
+      return;
+    }
+    send({dir: activeDir});
+  }, 250);
+}
+
+function setDriveDir(dir){
+  if(activeDir === dir) return;
+  activeDir = dir;
+  send({dir});
+  if(dir !== 0) ensureHoldTimer();
+}
+
+function cancelHoldDrive(){
+  pressedKeys.clear();
+  activeDir = 0;
+  if(holdTimer){
+    clearInterval(holdTimer);
+    holdTimer = null;
+  }
+}
+
+function stopDrive(){
+  cancelHoldDrive();
+  send({dir:0});
+}
+
+function lastPressedDir(){
+  let dir = 0;
+  for(const value of pressedKeys.values()) dir = value;
+  return dir;
+}
+
+function dirButtons(){
+  const bindHold = (id, dir) => {
+    const el = document.getElementById(id);
+    el.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      el.setPointerCapture?.(e.pointerId);
+      setDriveDir(dir);
+    });
+    el.addEventListener('pointerup', stopDrive);
+    el.addEventListener('pointercancel', stopDrive);
+    el.addEventListener('lostpointercapture', stopDrive);
+  };
+  bindHold("fwd", 1);
+  bindHold("back",2);
+  bindHold("left",4);
+  bindHold("right",3);
+
+  stopBtn.addEventListener('click', () => {
+    cancelHoldDrive();
+    sendJoystickStop();
+    send({stbyToggle:1});
+  });
+}
+
+function keyboardDrive(){
+  document.addEventListener('keydown', (e) => {
+    const dir = dirFromKeyEvent(e);
+    if(!dir) return;
+    e.preventDefault();
+    e.stopPropagation();
+    if(!pressedKeys.has(e.code)) pressedKeys.set(e.code, dir);
+    setDriveDir(dir);
+  }, true);
+
+  document.addEventListener('keyup', (e) => {
+    const dir = dirFromKeyEvent(e);
+    if(!dir) return;
+    e.preventDefault();
+    e.stopPropagation();
+    pressedKeys.delete(e.code);
+    setDriveDir(lastPressedDir());
+  }, true);
+
+  window.addEventListener('blur', stopDrive);
+  document.addEventListener('visibilitychange', () => {
+    if(document.hidden) stopDrive();
+  });
+}
+
+function clamp(v, min, max){
+  return Math.max(min, Math.min(max, v));
+}
+
+function joystickChangedEnough(){
+  return joystick.lastThrottle === null ||
+         Math.abs(joystick.throttle - joystick.lastThrottle) >= JOYSTICK_CHANGE_STEP ||
+         Math.abs(joystick.turn - joystick.lastTurn) >= JOYSTICK_CHANGE_STEP;
+}
+
+function clearJoystickTimer(){
+  if(!joystick.timer) return;
+  clearTimeout(joystick.timer);
+  joystick.timer = null;
+}
+
+function sendJoystickNow(force=false){
+  if(!force && !joystickChangedEnough()) return;
+  send({joyThrottle: joystick.throttle, joyTurn: joystick.turn});
+  joystick.lastThrottle = joystick.throttle;
+  joystick.lastTurn = joystick.turn;
+  joystick.lastSendMs = Date.now();
+}
+
+function queueJoystickSend(force=false){
+  if(force){
+    clearJoystickTimer();
+    sendJoystickNow(true);
+    return;
+  }
+
+  if(!joystickChangedEnough()) return;
+
+  const waitMs = JOYSTICK_SEND_MS - (Date.now() - joystick.lastSendMs);
+  if(waitMs <= 0){
+    clearJoystickTimer();
+    sendJoystickNow();
+    return;
+  }
+
+  if(joystick.timer) return;
+  joystick.timer = setTimeout(() => {
+    joystick.timer = null;
+    sendJoystickNow();
+  }, waitMs);
+}
+
+function sendJoystickStop(){
+  const token = ++joystick.stopToken;
+  joystick.throttle = 0;
+  joystick.turn = 0;
+  queueJoystickSend(true);
+
+  [80, 160].forEach((delayMs) => {
+    setTimeout(() => {
+      if(token !== joystick.stopToken) return;
+      if(joystick.leftActive || joystick.rightActive) return;
+      sendJoystickNow(true);
+    }, delayMs);
+  });
+}
+
+function setupJoystick(id, axis){
+  const el = document.getElementById(id);
+  const knob = el.querySelector(".knob");
+  const activeKey = axis === "y" ? "leftActive" : "rightActive";
+  const pointerKey = axis === "y" ? "leftPointer" : "rightPointer";
+
+  const setKnob = (x, y) => {
+    knob.style.transform = `translate(calc(-50% + ${x}px), calc(-50% + ${y}px))`;
+  };
+
+  const update = (e, force=false) => {
+    if(joystick[pointerKey] !== null && e.pointerId !== joystick[pointerKey]) return;
+
+    const rect = el.getBoundingClientRect();
+    const radius = Math.min(rect.width, rect.height) * 0.38;
+    const cx = rect.left + rect.width / 2;
+    const cy = rect.top + rect.height / 2;
+    let dx = e.clientX - cx;
+    let dy = e.clientY - cy;
+    const length = Math.hypot(dx, dy);
+
+    if(length > radius){
+      dx = dx / length * radius;
+      dy = dy / length * radius;
+    }
+
+    if(axis === "y"){
+      dx = 0;
+      joystick.throttle = Math.round(clamp(-dy / radius, -1, 1) * 255);
+    }else{
+      dy = 0;
+      joystick.turn = Math.round(clamp(dx / radius, -1, 1) * 255);
+    }
+
+    setKnob(dx, dy);
+    queueJoystickSend(force);
+  };
+
+  const reset = (e) => {
+    if(joystick[pointerKey] === null && !joystick[activeKey]) return;
+    if(e && joystick[pointerKey] !== null && e.pointerId !== joystick[pointerKey]) return;
+
+    joystick[activeKey] = false;
+    joystick[pointerKey] = null;
+    if(axis === "y") joystick.throttle = 0;
+    else joystick.turn = 0;
+    setKnob(0, 0);
+    if(!joystick.leftActive && !joystick.rightActive) sendJoystickStop();
+    else queueJoystickSend(true);
+  };
+
+  el.addEventListener("pointerdown", (e) => {
+    e.preventDefault();
+    cancelHoldDrive();
+    el.setPointerCapture?.(e.pointerId);
+    joystick[activeKey] = true;
+    joystick[pointerKey] = e.pointerId;
+    joystick.stopToken++;
+    update(e, true);
+  });
+  el.addEventListener("pointermove", (e) => {
+    if(joystick[activeKey]) update(e);
+  });
+  el.addEventListener("pointerup", reset);
+  el.addEventListener("pointercancel", reset);
+  el.addEventListener("lostpointercapture", reset);
+
+  document.addEventListener("pointerup", reset, true);
+  document.addEventListener("pointercancel", reset, true);
+  joystick.resetters.push(reset);
+}
+
+function joystickUI(){
+  setupJoystick("leftStick", "y");
+  setupJoystick("rightStick", "x");
+  window.addEventListener("blur", () => {
+    for(const reset of joystick.resetters) reset();
+    sendJoystickStop();
+  });
+}
+
+function updateStbyButton(enabled){
+  stopBtn.classList.toggle("disabled", !enabled);
+  stopBtn.textContent = enabled ? "STOP" : "ENABLE";
+}
+
+function initWS(){
+  ws = new WebSocket(gateway);
+  ws.onopen = () => {
+    console.log("WS open");
+    if(activeDir !== 0) send({dir: activeDir});
+    if(joystick.leftActive || joystick.rightActive || joystick.throttle !== 0 || joystick.turn !== 0) {
+      sendJoystickNow(true);
+    }
+  };
+  ws.onclose = () => { console.log("WS close"); setTimeout(initWS, 1000); };
+  ws.onmessage = (e) => {
+    try{
+      const o = JSON.parse(e.data);
+      if(o.speed !== undefined){
+        spd.value = o.speed;
+        spdTxt.textContent = o.speed;
+      }
+      if(o.stbyEnabled !== undefined){
+        updateStbyButton(!!o.stbyEnabled);
+      }
+      if(o.timerTicks !== undefined || o.wifiClients !== undefined){
+        const ticks = o.timerTicks ?? 0;
+        const clients = o.wifiClients ?? 0;
+        timerStatus.textContent = `Timer: ${ticks} | Wi-Fi clients: ${clients}`;
+      }
+    }catch(_){}
+  };
+}
+
+function appendLog(text){
+  logEl.textContent += text;
+  if(logEl.textContent.length > 12000){
+    logEl.textContent = logEl.textContent.slice(-12000);
+  }
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+function initLogWS(){
+  logWs = new WebSocket(logGateway);
+  logWs.onmessage = (e) => appendLog(e.data);
+  logWs.onclose = () => setTimeout(initLogWS, 1000);
+}
+
+spd.addEventListener('input', ()=> spdTxt.textContent = spd.value);
+spd.addEventListener('change', ()=> send({speed: parseInt(spd.value)}));
+
+window.addEventListener('load', ()=>{
+  dirButtons();
+  keyboardDrive();
+  joystickUI();
+  initWS();
+  initLogWS();
 });
 </script>
-
-</body>
 </html>

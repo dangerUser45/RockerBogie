@@ -7,6 +7,11 @@
 uint8_t pcfState = 0xFF;
 uint8_t pcfStateRear = 0xFF;
 
+static Direction lastDirections[6];
+static bool directionKnown[6] = { false, false, false, false, false, false };
+static uint8_t lastDuties[6];
+static bool dutyKnown[6] = { false, false, false, false, false, false };
+
 // -------------------- Работа с PCF8574 --------------------
 
 static uint8_t* pcfStateForAddr(uint8_t addr) {
@@ -28,11 +33,9 @@ bool pcfWriteState(uint8_t addr) {
     if (error != 0) {
         Debug.printf("[PCF 0x%02X] write ERROR = %u\n", addr, error);
         return false;
-    } else {
-        Debug.printf("[PCF 0x%02X] state written: 0b", addr);
-        Debug.println(*state, BIN);
-        return true;
     }
+
+    return true;
 }
 
 bool pcfWriteState() {
@@ -53,17 +56,21 @@ void pcfSetPin(uint8_t addr, uint8_t pin, bool level) {
         return;
     }
 
-    if (level) {
-        *state |= (1 << pin);
-    } else {
-        *state &= ~(1 << pin);
+    const uint8_t mask = (1 << pin);
+    if (((*state & mask) != 0) == level) {
+        return;
     }
 
-    Debug.printf("[PCF 0x%02X] pin %u <- %s | new state: 0b",
-                  addr, pin, level ? "HIGH" : "LOW");
-    Debug.println(*state, BIN);
+    const uint8_t oldState = *state;
+    if (level) {
+        *state |= mask;
+    } else {
+        *state &= ~mask;
+    }
 
-    pcfWriteState(addr);
+    if (!pcfWriteState(addr)) {
+        *state = oldState;
+    }
 }
 
 void pcfSetPin(uint8_t pin, bool level) {
@@ -84,14 +91,17 @@ static bool stagePcfPin(const DirPin& dirPin, bool level) {
         return false;
     }
 
-    if (level) {
-        *state |= (1 << dirPin.pin);
-    } else {
-        *state &= ~(1 << dirPin.pin);
+    const uint8_t mask = (1 << dirPin.pin);
+    if (((*state & mask) != 0) == level) {
+        return false;
     }
 
-    Debug.printf("[PCF 0x%02X] pin %u <- %s\n",
-                  dirPin.addr, dirPin.pin, level ? "HIGH" : "LOW");
+    if (level) {
+        *state |= mask;
+    } else {
+        *state &= ~mask;
+    }
+
     return true;
 }
 
@@ -102,24 +112,30 @@ static void markPcfChanged(uint8_t addr, bool& mainChanged, bool& rearChanged) {
 
 // Направление мотора меняем атомарно: обе линии направления готовятся
 // сначала, и только потом уходит одна запись в PCF8574.
-static void writeDirPins(const DirPin& in1, bool in1Level, const DirPin& in2, bool in2Level) {
+static bool writeDirPins(const DirPin& in1, bool in1Level, const DirPin& in2, bool in2Level) {
     bool mainChanged = false;
     bool rearChanged = false;
+    bool ok = true;
+    const uint8_t oldMainState = pcfState;
+    const uint8_t oldRearState = pcfStateRear;
 
     if (stagePcfPin(in1, in1Level)) markPcfChanged(in1.addr, mainChanged, rearChanged);
     if (stagePcfPin(in2, in2Level)) markPcfChanged(in2.addr, mainChanged, rearChanged);
 
     if (mainChanged) {
-        Debug.print("[PCF 0x20] new state: 0b");
-        Debug.println(pcfState, BIN);
-        pcfWriteState(PCF8574_ADDR_MAIN);
+        ok = pcfWriteState(PCF8574_ADDR_MAIN) && ok;
     }
 
     if (rearChanged) {
-        Debug.print("[PCF 0x21] new state: 0b");
-        Debug.println(pcfStateRear, BIN);
-        pcfWriteState(PCF8574_ADDR_REAR);
+        ok = pcfWriteState(PCF8574_ADDR_REAR) && ok;
     }
+
+    if (!ok) {
+        if (mainChanged) pcfState = oldMainState;
+        if (rearChanged) pcfStateRear = oldRearState;
+    }
+
+    return ok;
 }
 
 // -------------------- Управление моторами --------------------
@@ -167,34 +183,53 @@ void motorPwmInit() {
 
 void setMotorDirection(Motor m, Direction dir) {
     const MotorCfg& c = getCfg(m);
+    const int idx = (int)m;
 
-    Debug.printf("[MOTOR %s] direction -> %s\n", c.name, dirToStr(dir));
+    if (directionKnown[idx] && lastDirections[idx] == dir) {
+        return;
+    }
+
+    bool ok = false;
 
     switch (dir) {
         case DIR_STOP:
             // IN1=0, IN2=0
-            writeDirPins(c.in1, false, c.in2, false);
+            ok = writeDirPins(c.in1, false, c.in2, false);
             break;
 
         case DIR_FORWARD:
-            // IN1=1, IN2=0
-            writeDirPins(c.in1, true, c.in2, false);
+            // Physical forward for this wiring.
+            // IN1=0, IN2=1
+            ok = writeDirPins(c.in1, false, c.in2, true);
             break;
 
         case DIR_BACKWARD:
-            // IN1=0, IN2=1
-            writeDirPins(c.in1, false, c.in2, true);
+            // Physical backward for this wiring.
+            // IN1=1, IN2=0
+            ok = writeDirPins(c.in1, true, c.in2, false);
             break;
 
         case DIR_BRAKE:
             // IN1=1, IN2=1
-            writeDirPins(c.in1, true, c.in2, true);
+            ok = writeDirPins(c.in1, true, c.in2, true);
             break;
+    }
+
+    if (ok) {
+        lastDirections[idx] = dir;
+        directionKnown[idx] = true;
     }
 }
 
 void setMotorSpeed(Motor m, uint8_t duty) {
     const MotorCfg& c = getCfg(m);
-    Debug.printf("[%s] PWM = %u\n", c.name, duty);
+    const int idx = (int)m;
+
+    if (dutyKnown[idx] && lastDuties[idx] == duty) {
+        return;
+    }
+
     ledcWrite(c.pwmCh, duty);
+    lastDuties[idx] = duty;
+    dutyKnown[idx] = true;
 }
